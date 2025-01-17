@@ -1,0 +1,49 @@
+localrules:
+    all_top_pairs
+
+rule all:
+    input:
+        # "all_top_pairs.txt",
+        expand("{region}.aFC.txt", region = ["Acbc", "IL", "LHB", "PL", "VoLo"])
+
+rule all_top_pairs:
+    input:
+        # Change *CCT to *QCT once it's run.
+        expand("../tensorqtl/{region}CCT.cis_qtl.txt.gz", region=["A", "I", "L", "P", "V"])
+    output:
+        "all_top_pairs.txt"
+    shell:
+        """
+        echo |> {output}.tmp
+        for FILE in {input}; do
+            python3 ~/src/prepare_qtl_for_afc.py $FILE | tail -n+2 >> {output}.tmp
+        done
+        echo "pid\tsid\tsid_chr\tsid_pos" > {output}
+        sort {output}.tmp | uniq | sort -k3,3 -k4,4 -n >> {output}
+        rm {output}.tmp
+        """
+
+rule aFC_from_eQTL_model:
+    input:
+        vcf = "../genotype/P50.rnaseq.88.unpruned.vcf.gz",
+        vcfi = "../genotype/P50.rnaseq.88.unpruned.vcf.gz.tbi",
+        bed = "../expression/ensembl-gene_log2_{region}.bed.gz",
+        bedi = "../expression/ensembl-gene_log2_{region}.bed.gz",
+        qtl = "all_top_pairs.txt",
+        covar = lambda w: f"../tensorqtl/{w.region[0]}QCT.combined_covariates.txt",
+    output:
+        "{region}.aFC.txt"
+    conda:
+        "../../envs/afc.yaml"
+    resources:
+        walltime = 12
+    shell:
+        """
+        python3 ~/tools/aFC/aFC.py \
+        --vcf {input.vcf} \
+        --pheno {input.bed} \
+        --qtl {input.qtl} \
+        --cov <(sed 's/-N//g' {input.covar}) \
+        --log_xform 1 \
+        --output {output}
+        """

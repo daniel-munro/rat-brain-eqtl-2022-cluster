@@ -1,0 +1,148 @@
+tissues = open("tissues.txt", "r").read().splitlines()
+
+
+rule all:
+    input:
+        expand("covar/{tissue}.txt", tissue=tissues[:1]),
+        expand("expr/{tissue}.bed.gz", tissue=tissues[:1]),
+        expand("out/{tissue}.cis_qtl.txt.gz", tissue=tissues),
+
+
+rule sample_list:
+    input:
+        "GTEx_Analysis_v8_eQTL_expression_matrices/{tissue}.v8.normalized_expression.bed.gz"
+    output:
+        all = "sample_list/{tissue}.all.txt",
+        sub = "sample_list/{tissue}.txt"
+    params:
+        n_samples = 81
+    shell:
+        """
+        zcat {input} | head -1 | cut -f5- | sed 's/\\t/\\n/g' > {output.all} || true
+        cat {output.all} | shuf -n{params.n_samples} | sort > {output.sub}
+        """
+
+
+# rule vcf_to_plink:
+#     input:
+#         vcf = "/secure/common/group/data/GTEx/V8/V8/genotypes/WGS/variant_calls/GTEx_Analysis_2017-06-05_v8_WholeGenomeSeq_838Indiv_Analysis_Freeze.SHAPEIT2_phased.vcf",
+#         samples = "sample_list/{tissue}.txt"
+#     output:
+#         multiext("geno/{tissue}", ".bed", ".bim", ".fam")
+#     params:
+#         prefix = "geno/{tissue}"
+#     shell:
+#         """
+#         plink2 --make-bed \
+#         --vcf {input.vcf} \
+#         --keep {input.samples} \
+#         --maf 0.01 \
+#         --max-maf 0.99 \
+#         --output-chr chrM \
+#         --out {params.prefix}
+#         """
+
+
+# rule sample_list:
+#     """Get sample subset from intersection of tissue sample sets so only one genotype set is needed."""
+#     input:
+#         expand("GTEx_Analysis_v8_eQTL_expression_matrices/{tissue}.v8.normalized_expression.bed.gz", tissue=tissues)
+#     output:
+#         "samples.txt"
+#     params:
+#         n_samples = 81
+#     run:
+#         import pandas as pd
+#         sets = []
+#         for f in input:
+#             samples = set(pd.read_csv(f, sep='\t', nrows=2).columns[4:])
+#             sets.append(samples)
+#             print(len(samples), len(set.intersection(*sets)), len(set.union(*sets)))
+
+
+rule all_samples:
+    """The union of brain region samples (before subsampling)."""
+    input:
+        expand("sample_list/{tissue}.all.txt", tissue=tissues)
+    output:
+        "all_samples.txt"
+    shell:
+        "cat {input} | sort | uniq > {output}"
+
+
+rule vcf_to_plink:
+    """Get genotypes for all individuals with brain tissue samples."""
+    input:
+        vcf = "/secure/common/group/data/GTEx/V8/V8/genotypes/WGS/variant_calls/GTEx_Analysis_2017-06-05_v8_WholeGenomeSeq_838Indiv_Analysis_Freeze.SHAPEIT2_phased.vcf",
+        samples = "all_samples.txt"
+    output:
+        multiext("geno", ".bed", ".bim", ".fam")
+    shell:
+        """
+        plink2 --make-bed \
+        --vcf {input.vcf} \
+        --keep {input.samples} \
+        --maf 0.01 \
+        --max-maf 0.99 \
+        --output-chr chrM \
+        --out geno
+        """
+
+
+rule expression:
+    input:
+        bed = "GTEx_Analysis_v8_eQTL_expression_matrices/{tissue}.v8.normalized_expression.bed.gz",
+        samples = "sample_list/{tissue}.txt"
+    output:
+        bed = "expr/{tissue}.bed"
+    run:
+        import pandas as pd
+        x = pd.read_csv(input.bed, sep='\t', dtype=str)
+        samples = open(input.samples, 'r').read().splitlines()
+        x = x[['#chr', 'start', 'end', 'gene_id'] + samples]
+        x.to_csv(output.bed, sep='\t', index=False)
+
+
+rule tabix_expression:
+    input:
+        "expr/{tissue}.bed"
+    output:
+        bed = "expr/{tissue}.bed.gz",
+        bedi = "expr/{tissue}.bed.gz.tbi"
+    shell:
+        "bgzip {input} && tabix {output.bed}"
+
+
+rule covar:
+    input:
+        covar = "Peer_factors/{tissue}.v8.covariates.txt",
+        samples = "sample_list/{tissue}.txt"
+    output:
+        covar = "covar/{tissue}.txt"
+    run:
+        import pandas as pd
+        x = pd.read_csv(input.covar, sep='\t', dtype=str)
+        samples = open(input.samples, 'r').read().splitlines()
+        x = x[['ID'] + samples]
+        x.to_csv(output.covar, sep='\t', index=False)
+
+
+rule tensorqtl_perm:
+    """Map cis-eQTLs, determining significance using permutations."""
+    input:
+        geno = multiext("geno", ".bed", ".bim", ".fam"),
+        bed = "expr/{tissue}.bed.gz",
+        bedi = "expr/{tissue}.bed.gz.tbi",
+        covar = "covar/{tissue}.txt"
+    output:
+        "out/{tissue}.cis_qtl.txt.gz"
+    shell:
+        """
+        python -m tensorqtl \
+            geno \
+            {input.bed} \
+            {wildcards.tissue} \
+            --covariates {input.covar} \
+            --output_dir out \
+            --mode cis
+        """

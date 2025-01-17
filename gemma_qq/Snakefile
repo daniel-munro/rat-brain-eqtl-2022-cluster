@@ -1,0 +1,145 @@
+# Whereas gemma_trans/ saved all strong associations, this saves a random sample of associations to make QQ plots.
+
+import pandas as pd
+
+chrs = range(1, 21)
+# chrs = [11, 15]
+ld_cutoff = 90
+nsnps_per_gene = 30 # To get reasonable output size, roughly same as all pval < 1e-3
+
+localrules:
+    # vcf_and_bed_to_bimbam,
+    gemma_top_eqtls,
+
+
+rule all:
+    input:
+        # "pruned.99.vcf.gz",
+        # "genes.txt",
+        # "lm/Acbc.12.assoc.txt",
+        "Acbc.lm.assoc.txt.gz",
+        "Acbc.lmm.assoc.txt.gz",
+
+
+rule prune_vcf:
+    input:
+        "../genotype/P50.rnaseq.88.unpruned.vcf.gz"
+    output:
+        "prune.{maxld}.prune.in",
+        "prune.{maxld}.log",
+        "pruned.{maxld}.vcf.gz"
+    shell:
+        # 1000-variant window, 0.99 LD threshold:
+        """
+        plink2 --vcf {input} \
+            --indep-pairwise 2000 0.{wildcards.maxld} \
+            --out prune.{wildcards.maxld}
+        rm prune.{wildcards.maxld}.prune.out
+        plink2 --vcf {input} \
+            --extract prune.{wildcards.maxld}.prune.in \
+            --export vcf bgz \
+            --out pruned.{wildcards.maxld}
+        """
+
+
+rule vcf_and_bed_to_bimbam:
+    input:
+        vcf = f"pruned.{ld_cutoff}.vcf.gz",
+        bed = "../expression/ensembl-gene_inv-quant_Acbc.bed.gz"
+    output:
+        geno = "geno.txt.gz",
+        pheno = "pheno.txt",
+        genes = "genes.txt",
+        snps = "snps.txt",
+        samples = "samples.txt", # Just for reference
+    params:
+        geno = "geno.txt"
+    conda:
+        "../../../envs/biopython.yaml"
+    shell:
+        """
+        python3 ~/br/src/vcf_and_bed_to_bimbam.py \
+            {input.vcf} {input.bed} \
+            {params.geno} {output.pheno} {output.genes} {output.snps} \
+            {output.samples}
+        gzip {params.geno}
+        """
+
+
+rule gemma_eqtl_lm:
+    input:
+        geno = "geno.txt.gz",
+        pheno = "pheno.txt",
+        covar = "../gemma/covar.txt",
+        snps = "snps.txt",
+        genes = "genes.txt",
+    output:
+        assoc = "lm/Acbc.{chrn}.assoc.txt",
+        log = "lm/Acbc.{chrn}.log.txt",
+    params:
+        nsnps = nsnps_per_gene,
+    conda:
+        "../../../envs/gemma.yaml"
+    resources:
+        walltime = 12,
+        cpus = 16
+    shell:
+        """
+        python3 ~/br/src/gemma_eqtls.py \
+            {input.geno} \
+            {input.pheno} \
+            {input.snps} \
+            {input.genes} \
+            {output.assoc} \
+            --covar {input.covar} \
+            --log {output.log} \
+            --chr {wildcards.chrn} \
+            --nsnps {params.nsnps} \
+            --jobs 16
+        """
+
+
+rule gemma_eqtl_lmm:
+    input:
+        geno = "geno.txt.gz",
+        pheno = "pheno.txt",
+        covar = "../gemma/covar.txt",
+        snps = "snps.txt",
+        genes = "genes.txt",
+        kinship = "../gemma/kinship/{chrn}.cXX.txt"
+    output:
+        assoc = "lmm/Acbc.{chrn}.assoc.txt",
+        log = "lmm/Acbc.{chrn}.log.txt",
+    params:
+        nsnps = nsnps_per_gene,
+    conda:
+        "../../../envs/gemma.yaml"
+    resources:
+        walltime = 24,
+        mem_mb = 20000,
+        cpus = 16
+    shell:
+        """
+        python3 ~/br/src/gemma_eqtls.py \
+            {input.geno} \
+            {input.pheno} \
+            {input.snps} \
+            {input.genes} \
+            {output.assoc} \
+            --covar {input.covar} \
+            --log {output.log} \
+            --chr {wildcards.chrn} \
+            --kinship {input.kinship} \
+            --nsnps {params.nsnps} \
+            --jobs 16
+        """
+
+
+rule gemma_top_eqtls:
+    """Since pvalue column arg isn't provided, this combines all results."""
+    input:
+        expand("{{mode}}/Acbc.{chrn}.assoc.txt", chrn=chrs)
+    output:
+        "Acbc.{mode}.assoc.txt.gz"
+    shell:
+        "python3 ~/br/src/gemma_top_eqtls.py {input} -o {output}"

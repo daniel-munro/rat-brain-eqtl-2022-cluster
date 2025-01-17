@@ -1,0 +1,170 @@
+import pandas as pd
+import numpy as np
+
+localrules:
+    sample_list,
+    expression,
+    expression_gz,
+    expression_tbi,
+    covariates,
+    vcf,
+    vcf_to_plink,
+
+
+rule all:
+    input:
+        # expand("{code}_{perm}/{code}_{perm}.samples.txt", code=["AQCT"], perm=[1]),
+        # "AQCT_1/AQCT_1.expression.bed.gz.tbi",
+        # "AQCT_1/AQCT_1.covariates.txt",
+        # "AQCT_1/AQCT_1.genotypes.vcf.gz",
+        # "AQCT_1/AQCT_1.genotypes.bed",
+        expand("{code}_{perm}/{code}_{perm}.cis_qtl.txt.gz",
+               code=["AQCT", "IQCT", "LQCT", "PQCT", "VQCT"],
+               perm=[1, 2, 3, 4, 5]),
+
+
+def geno_prefix(wildcards):
+    """Genotypes are expression dataset-specific to remove monomorphic SNPs."""
+    region = dict(A="Acbc", I="IL", L="LHB", P="PL", V="VoLo")[wildcards.code[0]]
+    expr = dict(L="log2", Q="inv-quant")[wildcards.code[1]]
+    return f"../genotypes/ensembl-gene_{expr}_{region}"
+
+
+def expr_bed(wildcards):
+    region = dict(A="Acbc", I="IL", L="LHB", P="PL", V="VoLo")[wildcards.code[0]]
+    expr = dict(L="log2", Q="inv-quant")[wildcards.code[1]]
+    return f"../../expression/ensembl-gene_{expr}_{region}.bed.gz"
+
+
+def covar_file(wildcards):
+    covar = dict(N="covar_empty", C="combined_covariates")[wildcards.code[2]]
+    return f"../{wildcards.code}.{covar}.txt"
+
+
+rule sample_list:
+    input:
+        expr_bed,
+    output:
+        "{code}_{perm}/{code}_{perm}.samples.txt"
+    run:
+        samples = pd.read_csv(input[0], sep="\t").columns[4:]
+        samples = np.random.choice(samples, size=len(samples), replace=True)
+        pd.Series(samples).to_csv(output[0], sep="\t", header=False, index=False)
+
+
+rule expression:
+    input:
+        bed = expr_bed,
+        samples = "{code}_{perm}/{code}_{perm}.samples.txt"
+    output:
+        bed = "{code}_{perm}/{code}_{perm}.expression.bed"
+    run:
+        samples = list(pd.read_csv(input.samples, names=["sample"])["sample"])
+        bed = pd.read_csv(input.bed, sep="\t", dtype=str)
+        bed2 = bed.iloc[:, :4].copy()
+        count = {sample: 0 for sample in samples}
+        for sample in samples:
+            count[sample] += 1
+            bed2[f"{sample}_{count[sample]}"] = bed[sample]
+        bed2.to_csv(output.bed, sep="\t", index=False)
+
+
+rule expression_gz:
+    input:
+        "{base}.bed"
+    output:
+        "{base}.bed.gz"
+    shell:
+        "bgzip {input}"
+
+
+rule expression_tbi:
+    input:
+        "{base}.bed.gz"
+    output:
+        "{base}.bed.gz.tbi"
+    shell:
+        "tabix {input}"
+
+
+rule covariates:
+    input:
+        covar = covar_file,
+        samples = "{code}_{perm}/{code}_{perm}.samples.txt"
+    output:
+        "{code}_{perm}/{code}_{perm}.covariates.txt"
+    run:
+        samples = list(pd.read_csv(input.samples, names=["sample"])["sample"])
+        d = pd.read_csv(input.covar, sep="\t", dtype=str)
+        d2 = d.iloc[:, :1].copy()
+        count = {sample: 0 for sample in samples}
+        for sample in samples:
+            count[sample] += 1
+            d2[f"{sample}_{count[sample]}"] = d[sample]
+        d2.to_csv(output[0], sep="\t", index=False)
+
+
+rule vcf:
+    input:
+        vcf = "../../genotype/P50.rnaseq.88.unpruned.vcf.gz",
+        samples = "{code}_{perm}/{code}_{perm}.samples.txt"
+    output:
+        "{code}_{perm}/{code}_{perm}.genotypes.vcf.gz"
+    params:
+        prefix = "{code}_{perm}/{code}_{perm}.genotypes"
+    shell:
+        """
+        zcat {input.vcf} | grep -P '^##' > {params.prefix}.tmp1
+        python3 bootstrap_vcf.py {input.vcf} {input.samples} {params.prefix}.tmp2
+        cat {params.prefix}.tmp1 {params.prefix}.tmp2 > {params.prefix}.vcf
+        bgzip {params.prefix}.vcf
+        rm {params.prefix}.tmp1 {params.prefix}.tmp2
+        """
+
+
+rule vcf_to_plink:
+    """Get SNPs that are not monomorphic in a given set of samples."""
+    input:
+        "{code}_{perm}/{code}_{perm}.genotypes.vcf.gz"
+    output:
+        multiext("{code}_{perm}/{code}_{perm}.genotypes", ".bed", ".bim", ".fam")
+    params:
+        prefix = "{code}_{perm}/{code}_{perm}.genotypes"
+    shell:
+        # Use these for all monomorphic SNPs:
+        # --maf 0.0001 \
+        # --max-maf 0.9999 \
+        """
+        plink2 --make-bed \
+        --vcf {input} \
+        --maf 0.01 \
+        --max-maf 0.99 \
+        --out {params.prefix}
+        """
+
+
+rule tensorqtl_perm:
+    input:
+        geno = lambda w: multiext("{code}_{perm}/{code}_{perm}.genotypes", ".bed", ".bim", ".fam"),
+        bed = "{code}_{perm}/{code}_{perm}.expression.bed.gz",
+        bedi = "{code}_{perm}/{code}_{perm}.expression.bed.gz.tbi",
+        covar = "{code}_{perm}/{code}_{perm}.covariates.txt"
+    output:
+        "{code}_{perm}/{code}_{perm}.cis_qtl.txt.gz"
+    params:
+        geno_prefix = "{code}_{perm}/{code}_{perm}.genotypes",
+        outdir = "{code}_{perm}"
+    conda:
+        "../../../../envs/tensorqtl.yaml"
+    resources:
+        walltime = 8,
+    shell:
+        # pip install -e ~/tools/tensorqtl
+        """
+        python -m tensorqtl --mode cis \
+            {params.geno_prefix} \
+            {input.bed} \
+            {wildcards.code}_{wildcards.perm} \
+            --covariates {input.covar} \
+            --output_dir {params.outdir}
+        """

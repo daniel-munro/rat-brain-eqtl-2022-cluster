@@ -1,0 +1,345 @@
+import pandas as pd
+
+localrules:
+    # vcf_and_bed_to_bimbam,
+    gemma_make_covar,
+    # gemma_top_eqtls,
+    gemma_pve,
+
+rule all:
+    input:
+        # expand("lm/Acbc.{chrn}.assoc.txt", chrn=range(1, 21)),
+        # expand("kinship/{chrn}.cXX.txt", chrn=range(1, 21)),
+        # expand("lmm/Acbc.{chrn}.assoc.txt", chrn=range(1, 21)),
+        # "Acbc.lm.assoc.txt",
+        # "Acbc.lmm.assoc.txt",
+        # "Acbc.lm_rand.assoc.txt",
+        # "Acbc.lmm_rand.assoc.txt",
+        "Acbc.lm_cov.assoc.txt",
+        "Acbc.lmm_cov.assoc.txt",
+
+# rule vcf_to_plink:
+#     input:
+#         "../genotype/P50.rnaseq.88.unpruned.vcf.gz"
+#     output:
+#         multiext("P50.rnaseq.88.unpruned", ".bed", ".bim", ".fam")
+#     params:
+#         prefix = "P50.rnaseq.88.unpruned"
+#     shell:
+#         """
+#         plink2 --make-bed \
+#         --vcf {input} \
+#         --out {params.prefix}
+#         """
+
+rule vcf_and_bed_to_bimbam:
+    input:
+        vcf = "../genotype/P50.rnaseq.88.unpruned.vcf.gz",
+        bed = "../expression/ensembl-gene_inv-quant_Acbc.bed.gz"
+    output:
+        geno = "geno.txt.gz",
+        pheno = "pheno.txt",
+        genes = "genes.txt",
+        snps = "snps.txt",
+        samples = "samples.txt", # Just for reference
+    params:
+        geno = "geno.txt"
+    conda:
+        "../../envs/biopython.yaml"
+    shell:
+        # plink2 \
+        # --vcf ../genotype/P50.rnaseq.88.unpruned.vcf.gz \
+        # --recode bimbam \
+        # --out P50.rnaseq.88.unpruned
+        """
+        python3 ~/src/vcf_and_bed_to_bimbam.py \
+            {input.vcf} {input.bed} \
+            {params.geno} {output.pheno} {output.genes} {output.snps} \
+            {output.samples}
+        gzip {params.geno}
+        """
+
+rule gemma_make_covar:
+    input:
+        covar = "../tensorqtl/AQCT.combined_covariates.txt",
+        samples = "samples.txt",
+    output:
+        covar = "covar.txt",
+        names = "covar_names.txt",
+    run:
+        samples = list(pd.read_csv(input.samples, header=None)[0])
+        d = pd.read_csv(input.covar, sep="\t", dtype=str)
+        d = d.rename(columns={"ID": "intercept"}) # just to have in names file
+        d["intercept"].to_csv(output.names, index=False)
+        # d = d[["intercept"] + samples].T
+        d = d[samples].T
+        d.insert(0, "intercept", 1)
+        d.to_csv(output.covar, sep="\t", index=False, header=False)
+
+rule gemma_kinship_loco:
+    input:
+        geno = "geno.txt.gz",
+        pheno = "pheno.txt",
+    output:
+        matrix = "kinship/{chrn}.cXX.txt",
+        log = "kinship/{chrn}.log.txt",
+    params:
+        outdir = "kinship",
+        tmpgeno = "kinship/geno_loco.{chrn}.txt"
+    conda:
+        "../../envs/gemma.yaml"
+    shell:
+        """
+        zcat {input.geno} | grep -v "^chr{wildcards.chrn}:" > {params.tmpgeno}
+        gemma -gk \
+            -g {params.tmpgeno} \
+            -p {input.pheno} \
+            -outdir {params.outdir} \
+            -o {wildcards.chrn}
+        rm {params.tmpgeno}
+        """
+
+# rule gemma:
+#     input:
+#         geno = "geno.txt",
+#         pheno = "pheno.txt",
+#         snps = "snps.txt",
+#     output:
+#         assoc = "output/Acbc.assoc.txt",
+#         log = "output/Acbc.log.txt",
+#     params:
+#         path = ".",
+#         cdgeno = "geno.txt",
+#         cdpheno = "pheno.txt",
+#         cdsnps = "snps.txt",
+#         prefix = "Acbc",
+#     shell:
+#         """
+#         cd {params.path}
+#         gemma -g {params.cdgeno} -p {params.cdpheno} -a {params.cdsnps} \
+#             -lm 1 -o {params.prefix}
+#         """
+
+rule gemma_eqtl_lm:
+    input:
+        geno = "geno.txt.gz",
+        pheno = "pheno.txt",
+        snps = "snps.txt",
+        genes = "genes.txt",
+    output:
+        assoc = "lm/Acbc.{chrn}.assoc.txt",
+        log = "lm/Acbc.{chrn}.log.txt",
+    conda:
+        "../../envs/gemma.yaml"
+    resources:
+        walltime = 12,
+        cpus = 16
+    shell:
+        """
+        python3 ~/src/gemma_eqtls.py \
+            {input.geno} \
+            {input.pheno} \
+            {input.snps} \
+            {input.genes} \
+            {output.assoc} \
+            --log {output.log} \
+            --chr {wildcards.chrn} \
+            --jobs 16
+        """
+
+rule gemma_eqtl_lmm:
+    input:
+        geno = "geno.txt.gz",
+        pheno = "pheno.txt",
+        snps = "snps.txt",
+        genes = "genes.txt",
+        kinship = "kinship/{chrn}.cXX.txt"
+    output:
+        assoc = "lmm/Acbc.{chrn}.assoc.txt",
+        log = "lmm/Acbc.{chrn}.log.txt",
+    conda:
+        "../../envs/gemma.yaml"
+    resources:
+        walltime = 12,
+        mem_mb = 20000,
+        cpus = 16
+    shell:
+        """
+        python3 ~/src/gemma_eqtls.py \
+            {input.geno} \
+            {input.pheno} \
+            {input.snps} \
+            {input.genes} \
+            {output.assoc} \
+            --log {output.log} \
+            --chr {wildcards.chrn} \
+            --kinship {input.kinship} \
+            --jobs 16
+        """
+
+rule gemma_eqtl_lm_shuf:
+    input:
+        geno = "geno.txt.gz",
+        pheno = "pheno_shuf.txt",
+        snps = "snps.txt",
+        genes = "genes.txt",
+    output:
+        assoc = "lm_shuf/Acbc.{chrn}.assoc.txt",
+        log = "lm_shuf/Acbc.{chrn}.log.txt",
+    conda:
+        "../../envs/gemma.yaml"
+    resources:
+        walltime = 12,
+        cpus = 16
+    shell:
+        """
+        python3 ~/src/gemma_eqtls.py \
+            {input.geno} \
+            {input.pheno} \
+            {input.snps} \
+            {input.genes} \
+            {output.assoc} \
+            --log {output.log} \
+            --chr {wildcards.chrn} \
+            --jobs 16
+        """
+
+rule gemma_eqtl_lmm_shuf:
+    input:
+        geno = "geno.txt.gz",
+        pheno = "pheno_shuf.txt",
+        snps = "snps.txt",
+        genes = "genes.txt",
+        kinship = "kinship/{chrn}.cXX.txt"
+    output:
+        assoc = "lmm_shuf/Acbc.{chrn}.assoc.txt",
+        log = "lmm_shuf/Acbc.{chrn}.log.txt",
+    conda:
+        "../../envs/gemma.yaml"
+    resources:
+        walltime = 12,
+        cpus = 16
+    shell:
+        """
+        python3 ~/src/gemma_eqtls.py \
+            {input.geno} \
+            {input.pheno} \
+            {input.snps} \
+            {input.genes} \
+            {output.assoc} \
+            --log {output.log} \
+            --chr {wildcards.chrn} \
+            --kinship {input.kinship} \
+            --jobs 16
+        """
+
+rule gemma_eqtl_lm_cov:
+    input:
+        geno = "geno.txt.gz",
+        pheno = "pheno.txt",
+        covar = "covar.txt",
+        snps = "snps.txt",
+        genes = "genes.txt",
+    output:
+        assoc = "lm_cov/Acbc.{chrn}.assoc.txt",
+        log = "lm_cov/Acbc.{chrn}.log.txt",
+    conda:
+        "../../envs/gemma.yaml"
+    resources:
+        walltime = 12,
+        cpus = 16
+    shell:
+        """
+        python3 ~/src/gemma_eqtls.py \
+            {input.geno} \
+            {input.pheno} \
+            {input.snps} \
+            {input.genes} \
+            {output.assoc} \
+            --covar {input.covar} \
+            --log {output.log} \
+            --chr {wildcards.chrn} \
+            --jobs 16
+        """
+
+rule gemma_eqtl_lmm_cov:
+    input:
+        geno = "geno.txt.gz",
+        pheno = "pheno.txt",
+        covar = "covar.txt",
+        snps = "snps.txt",
+        genes = "genes.txt",
+        kinship = "kinship/{chrn}.cXX.txt"
+    output:
+        assoc = "lmm_cov/Acbc.{chrn}.assoc.txt",
+        log = "lmm_cov/Acbc.{chrn}.log.txt",
+    conda:
+        "../../envs/gemma.yaml"
+    resources:
+        walltime = 24,
+        cpus = 16
+    shell:
+        """
+        python3 ~/src/gemma_eqtls.py \
+            {input.geno} \
+            {input.pheno} \
+            {input.snps} \
+            {input.genes} \
+            {output.assoc} \
+            --covar {input.covar} \
+            --log {output.log} \
+            --chr {wildcards.chrn} \
+            --kinship {input.kinship} \
+            --jobs 16
+        """
+
+rule gemma_top_eqtls:
+    input:
+        expand("{{mode}}/Acbc.{chrn}.assoc.txt", chrn=range(1, 21))
+    output:
+        "Acbc.{mode}.assoc.txt"
+    shell:
+        "python3 ~/src/gemma_top_eqtls.py {input} -p p_wald -o {output}"
+
+rule gemma_random_pairs:
+    input:
+        expand("{mode}/Acbc.{chrn}.assoc.txt",
+               mode=["lm", "lmm"],
+               chrn=range(1, 21))
+    output:
+        "Acbc.random_pairs.txt",
+    shell:
+        "python3 ~/src/gemma_random_eqtls.py"
+
+rule gemma_pve:
+    input:
+        expand("{{version}}/Acbc.{chrn}.log.txt", chrn=range(1, 21))
+    output:
+        "Acbc.{version}.pve.txt"
+    shell:
+        "python3 ~/src/gemma_parse_lmm_logs.py {input} -o {output}"
+
+rule eigenMT:
+    input:
+        ""
+    output:
+        ""
+    shell:
+    # --window 50 from https://github.com/chen42/HS_brain_eQTL/blob/master/eigenMT/run_eigenMT.sh
+        """
+        python eigenMT.py --chrom {wildcards.chrn} \
+        --QTL /gemma_loco/output_loco/OF/OF_gemma_chr${i}_results.txt \
+        --GEN OF_genotype_chr${i}.txt \
+        --GENPOS chr${i}_gen_pos.txt \
+        --PHEPOS rn6_gene_pos.tab \
+        --window 50 \
+        --OUT chr${i}_eigenMT_win50_result.txt
+        """
+
+# rule phenotype_file_for_plink:
+#     input:
+#         "../expression/ensembl-gene_inv-quant_ComBat_Acbc.bed.gz"
+#     output:
+#         "pheno.txt"
+#     run:
+#         d = pd.read_csv(input, sep="\t")

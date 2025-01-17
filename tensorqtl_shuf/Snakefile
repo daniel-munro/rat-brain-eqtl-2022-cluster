@@ -1,0 +1,112 @@
+localrules:
+    shuffled_expr,
+    expression_pcs,
+    covars,
+    tensorqtl_perm_shuffled_test,
+
+wildcard_constraints:
+    i = "[0-9]+"
+
+regions = ["Acbc", "IL", "LHB", "PL", "VoLo"]
+
+rule all:
+    input:
+        # expand("{i}/{region}.combined_covariates.txt", i=range(1), region=regions),
+        expand("{i}/{region}.cis_qtl.txt.gz", i=range(3), region=regions)
+
+rule shuffled_expr:
+    input:
+        expand("../../expression/ensembl-gene_inv-quant_{region}.bed.gz", region=regions)
+    output:
+        expand("{{i}}/ensembl-gene_inv-quant_{region}.bed", region=regions)
+    shell:
+        "python3 ~/src/shuffle_expr_files.py -i {input} -o {output} --seed {wildcards.i}"
+
+rule bgzip_and_index:
+    input:
+        "{i}/ensembl-gene_{expr}.bed"
+    output:
+        bed = "{i}/ensembl-gene_{expr}.bed.gz",
+        bedi = "{i}/ensembl-gene_{expr}.bed.gz.tbi"
+    shell:
+        "bgzip {input} && tabix {output.bed}"
+
+rule expression_pcs:
+    input:
+        "{base}.bed.gz"
+    output:
+        "{base}.pca.txt"
+    params:
+        n_pcs = 10
+    conda:
+        "../../../envs/bioinfo.yaml"
+    shell:
+        "Rscript ~/src/expression_pcs.R {input} {output} {params.n_pcs}"
+
+rule covars:
+    input:
+        pca = "{i}/ensembl-gene_inv-quant_{region}.pca.txt",
+        founder_sim = "../sim_to_founders.txt"
+    output:
+        "{i}/{region}.combined_covariates.txt"
+    params:
+        prefix = "{i}/{region}"
+    shell:
+        """
+        python3 ~/src/combine_covariates.py {input.pca} {params.prefix} \
+        --add_covariates {input.founder_sim}
+        """
+
+rule tensorqtl_perm_shuffled:
+    input:
+        # Existing genotype files can be used since set of individuals per region is unchanged.
+        geno = multiext("../genotypes/ensembl-gene_inv-quant_{region}", ".bed", ".bim", ".fam"),
+        bed = "{i}/ensembl-gene_inv-quant_{region}.bed.gz",
+        bedi = "{i}/ensembl-gene_inv-quant_{region}.bed.gz.tbi",
+        covar = "{i}/{region}.combined_covariates.txt"
+    output:
+        "{i}/{region}.cis_qtl.txt.gz"
+    params:
+        geno_prefix = "../genotypes/ensembl-gene_inv-quant_{region}",
+        outdir = "{i}"
+    conda:
+        "../../../envs/tensorqtl.yaml"
+    resources:
+        walltime = 12,
+    shell:
+        """
+        # pip install -e ~/tools/tensorqtl
+        python -m tensorqtl --mode cis \
+            {params.geno_prefix} \
+            {input.bed} \
+            {wildcards.region} \
+            --covariates {input.covar} \
+            --output_dir {params.outdir}
+        """
+
+rule tensorqtl_perm_shuffled_test:
+    input:
+        # Existing genotype files can be used since set of individuals per region is unchanged.
+        geno = multiext("../genotypes/ensembl-gene_inv-quant_Acbc", ".bed", ".bim", ".fam"),
+        bed = "test.bed.gz",
+        covar = "0/Acbc.combined_covariates.txt"
+    output:
+        "test.cis_qtl.txt.gz"
+    params:
+        geno_prefix = "../genotypes/ensembl-gene_inv-quant_Acbc",
+        outdir = "."
+    conda:
+        "../../../envs/tensorqtl.yaml"
+    resources:
+        walltime = 12,
+    shell:
+        """
+        # pip install -e ~/tools/tensorqtl
+        python -m tensorqtl --mode cis \
+            {params.geno_prefix} \
+            {input.bed} \
+            test \
+            --covariates {input.covar} \
+            --output_dir {params.outdir}
+        """
+

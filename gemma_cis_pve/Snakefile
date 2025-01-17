@@ -1,0 +1,95 @@
+import pandas as pd
+
+expr_abbr = {"IL": "IL", "LHb": "LHB", "NAcc": "Acbc", "OFC": "VoLo", "PL": "PL"}
+
+localrules:
+    # vcf_and_bed_to_bimbam,
+    gemma_make_covar,
+
+
+rule all:
+    input:
+        # "IL/IL.12.log.txt",
+        expand("{tissue}.cis_pve.txt", tissue=["IL", "LHb", "NAcc", "OFC", "PL"]),
+
+
+rule vcf_and_bed_to_bimbam:
+    input:
+        vcf = "../genotype/P50.rnaseq.88.unpruned.vcf.gz",
+        bed = lambda w: f"../expression/ensembl-gene_inv-quant_{expr_abbr[w.tissue]}.bed.gz"
+    output:
+        geno = "{tissue}/geno.txt.gz",
+        pheno = "{tissue}/pheno.txt",
+        genes = "{tissue}/genes.txt",
+        snps = "{tissue}/snps.txt",
+        samples = "{tissue}/samples.txt", # Just for reference
+    params:
+        geno = "{tissue}/geno.txt"
+    shell:
+        """
+        python3 ~/br/src/vcf_and_bed_to_bimbam.py \
+            {input.vcf} {input.bed} \
+            {params.geno} {output.pheno} {output.genes} {output.snps} \
+            {output.samples}
+        gzip {params.geno}
+        """
+
+
+rule gemma_make_covar:
+    input:
+        covar = lambda w: f"../tensorqtl/{expr_abbr[w.tissue][0]}QCT.combined_covariates.txt",
+        samples = "{tissue}/samples.txt",
+    output:
+        covar = "{tissue}/covar.txt",
+        names = "{tissue}/covar_names.txt",
+    run:
+        samples = list(pd.read_csv(input.samples, header=None)[0])
+        d = pd.read_csv(input.covar, sep="\t", dtype=str)
+        d = d.rename(columns={"ID": "intercept"}) # just to have in names file
+        d["intercept"].to_csv(output.names, index=False)
+        # d = d[["intercept"] + samples].T
+        d = d[samples].T
+        print(list(d.columns))
+        d.insert(0, "intercept", 1)
+        d.to_csv(output.covar, sep="\t", index=False, header=False)
+
+
+rule gemma_cis_pve:
+    """Extract PVE from all chr logs"""
+    input:
+        expand("{{tissue}}/{{tissue}}.{chrn}.log.txt", chrn=range(1, 21))
+    output:
+        "{tissue}.cis_pve.txt"
+    shell:
+        "python3 ~/br/src/gemma_parse_lmm_logs.py {input} -o {output}"
+
+
+rule gemma_cis_pve_chr:
+    """Run GEMMA with gene-specific cis-window GRM and no SNPs to get PVE (heritability)"""
+    input:
+        geno = "{tissue}/geno.txt.gz",
+        pheno = "{tissue}/pheno.txt",
+        covar = "{tissue}/covar.txt",
+        snps = "{tissue}/snps.txt",
+        genes = "{tissue}/genes.txt",
+    output:
+        "{tissue}/{tissue}.{chrn}.log.txt"
+    params:
+        tmpdir = "{tissue}/tmp_{chrn}",
+    resources:
+        walltime = 6,
+        cpus = 16
+    shell:
+        """
+        mkdir {params.tmpdir}
+        python3 ~/br/src/gemma_cis_pve.py \
+            {input.geno} \
+            {input.pheno} \
+            {input.snps} \
+            {input.genes} \
+            {output} \
+            {params.tmpdir} \
+            --covar {input.covar} \
+            --chr {wildcards.chrn} \
+            --jobs {resources.cpus}
+        """

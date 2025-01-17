@@ -1,0 +1,321 @@
+import pandas as pd
+import numpy as np
+
+regions = ["Acbc", "IL", "LHB", "PL", "VoLo"]
+# regions = ["IL"]
+fastqs = pd.read_csv("../fastq/fastq_files_listing.txt", sep="\t")
+sample_ids = {}
+for region in regions:
+    fastqs_region = fastqs.loc[fastqs["brain_region"] == region]
+    sam_region = fastqs_region["library"].unique()
+    sample_ids[region] = sam_region
+
+# rng = np.random.default_rng(seed=653987)
+# rand_samples = rng.permutation(sample_ids["IL"])[:10]
+# wrong_bam = rand_samples[list(range(1, 10)) + [0]]
+# wrong_bam = {rand_samples[i]: wrong_bam[i] for i in range(len(rand_samples))}
+
+rng = np.random.default_rng(seed=653988)
+mixed_pairs = []
+for region in regions:
+    rand_samples = rng.permutation(sample_ids[region])
+    for i in range(10):
+        rat_id = rand_samples[i].split("_")[0]
+        mixed_pairs.append((rat_id, rand_samples[i + 1]))
+
+trymatch_pairs = []
+# Add all-by-all pairs per tissue to see if they're swapped:
+mismatched = [
+    ["00078A0224_Acbc", "00078A18A7_Acbc", "00078A2667_Acbc"],
+    ["000789FFF8_IL", "00078A18A7_IL", "00078A2667_IL"],
+    ["000789FFF0_LHB", "000789FFF9_LHB", "00078A18A7_LHB"],
+    ["00078A18A7_PL", "00078A2667_PL"],
+    ["00078A18A7_VoLo", "00078A2667_VoLo"],
+]
+for mismatches in mismatched:
+    for vcf_id in mismatches:
+        rat_id = vcf_id.split("_")[0]
+        for bam_id in mismatches:
+            trymatch_pairs.append((rat_id, bam_id))
+# For those that aren't just swapped, try against all VCFs:
+all_rat_ids = list(set([id.split("_")[0] for ids in sample_ids.values() for id in ids]))
+for bam_id in ["00078A18A7_Acbc", "00078A2667_Acbc", "00078A0224_Acbc", "000789FFF8_IL"]:
+    for rat_id in all_rat_ids:
+        trymatch_pairs.append((rat_id, bam_id))
+# For resolved matches found in one tissue, try same resolution in other tissues:
+for tissue in ["PL", "VoLo"]:
+    trymatch_pairs.append(("000789FFF8", f"00078A2667_{tissue}"))
+
+# Samples for alternative method (test_snps/)
+all_sample_ids = [id for ids in sample_ids.values() for id in ids]
+# all_sample_ids = all_sample_ids[:10]
+
+localrules:
+    test_snps_vcf,
+    assemble_ASE_test_snps,
+    het_vcf,
+    vcf_index,
+    # ASEReadCounter,
+    assemble_ASE,
+    assemble_ASE_mixed,
+    assemble_ASE_trymatch,
+
+rule all:
+    input:
+        # expand("readcounts/{sample_id}.readcounts.txt", sample_id=sample_ids["IL"]),
+        # expand("readcounts_mixed/{sample_id}.mixed.readcounts.txt", sample_id=rand_samples),
+        # expand("{group}.counts.txt.gz", group=["Acbc", "IL", "LHB", "PL", "VoLo", "mixed", "trymatch"])
+        "test_snps.counts.txt.gz"
+
+rule haplotype_caller:
+    input:
+        ref = "../Rnor_6.0/Rattus_norvegicus.Rnor_6.0.dna.toplevel.fa",
+        bam = "../markdup_out/IL/00077E67B5_IL.bam"
+    output:
+        "test.g.vcf.gz"
+    conda:
+        "../../envs/gatk.yaml"
+    shell:
+        """
+        gatk --java-options "-Xmx4g" HaplotypeCaller \
+        -R {input.ref} \
+        -I {input.bam} \
+        -O {output} \
+        -ERC GVCF
+        """
+
+# bcftools view --min-ac 71:minor -Oz -o test_snps.vcf.gz ../genotype/P50.rnaseq.88.unpruned.vcf.gz
+# zcat test_snps.vcf.gz | grep -P "^#" > test_snps2.vcf
+# zcat test_snps.vcf.gz | grep -v "#" | shuf -n 10000 >> test_snps2.vcf
+# bcftools sort -Oz -o test_snps3.vcf.gz test_snps2.vcf
+
+rule test_snps_vcf:
+    input:
+        "../genotype/P50.rnaseq.88.unpruned.vcf.gz"
+    output:
+        "test_snps.vcf.gz"
+    shell:
+        """
+        bcftools view --min-ac 71:minor -Oz -o tmp1 {input}
+        zcat tmp1 | grep -P "^#" > tmp2
+        zcat tmp1 | grep -v "#" | shuf -n 10000 >> tmp2
+        bcftools sort -Oz -o {output} tmp2
+        rm tmp1 tmp2
+        """
+
+rule ASEReadCounter_test_snps:
+    input:
+        ref = "../Rnor_6.0/Rattus_norvegicus.Rnor_6.0.dna.toplevel.fa",
+        refi = "../Rnor_6.0/Rattus_norvegicus.Rnor_6.0.dna.toplevel.fa.fai",
+        refd = "../Rnor_6.0/Rattus_norvegicus.Rnor_6.0.dna.toplevel.dict",
+        bam = "../markdup_out/{region}/{rat_id}_{region}.bam",
+        vcf = "test_snps.vcf.gz",
+        vcfi = "test_snps.vcf.gz.tbi"
+    output:
+        "test_snps/{rat_id}_{region}.readcounts.txt"
+    conda:
+        "../../envs/gatk.yaml"
+    shell:
+        """
+        gatk ASEReadCounter \
+        -R {input.ref} \
+        -I {input.bam} \
+        -V {input.vcf} \
+        -O {output} \
+        --min-depth-of-non-filtered-base 10 \
+        --min-mapping-quality 250 \
+        --min-base-quality 15
+        """
+
+rule assemble_ASE_test_snps:
+    input:
+        lambda w: expand("test_snps/{sample_id}.readcounts.txt", sample_id=all_sample_ids)
+    output:
+        "test_snps.counts.txt.gz"
+    params:
+        sample_ids = lambda w: " ".join(all_sample_ids),
+        interm = "test_snps.counts.txt"
+    shell:
+        """
+        echo "sample_id\tvariant_id\tref_count\talt_count" > {params.interm}
+        for ID in {params.sample_ids}; do
+            FILE="test_snps/$ID.readcounts.txt"
+            tail -n +2 $FILE | cut -f3,6,7 | sed "s/^/$ID\t/" >> {params.interm}
+        done
+        gzip {params.interm}
+        """
+
+
+
+
+rule het_vcf:
+    input:
+        # "../genotype/individual/00077E67B5.vcf.gz"
+        "../genotype/P50.rnaseq.88.unpruned.vcf.gz"
+    output:
+        "{rat_id}.vcf.gz"
+    shell:
+        # bcftools view --no-update -i 'GT="het"' --regions 1 -Oz -o {output} {input}
+        """
+        bcftools view --no-update -s {wildcards.rat_id} -Oz {input} | bcftools view -i 'GT="het"' -Oz -o {output}
+        """
+
+rule vcf_index:
+    input:
+        "{base}.vcf.gz"
+    output:
+        "{base}.vcf.gz.tbi"
+    shell:
+        "tabix {input}"
+
+rule ASEReadCounter:
+    input:
+        ref = "../Rnor_6.0/Rattus_norvegicus.Rnor_6.0.dna.toplevel.fa",
+        refi = "../Rnor_6.0/Rattus_norvegicus.Rnor_6.0.dna.toplevel.fa.fai",
+        refd = "../Rnor_6.0/Rattus_norvegicus.Rnor_6.0.dna.toplevel.dict",
+        bam = "../markdup_out/{region}/{rat_id}_{region}.bam",
+        vcf = "{rat_id}.vcf.gz",
+        vcfi = "{rat_id}.vcf.gz.tbi"
+    output:
+        "readcounts/{rat_id}_{region}.readcounts.txt"
+    conda:
+        "../../envs/gatk.yaml"
+    shell:
+        # -DF NotDuplicateReadFilter
+        """
+        gatk ASEReadCounter \
+        -R {input.ref} \
+        -I {input.bam} \
+        -V {input.vcf} \
+        -O {output} \
+        --min-depth-of-non-filtered-base 1 \
+        --min-mapping-quality 250 \
+        --min-base-quality 15
+        """
+
+# rule ASEReadCounter_wrong_vcf:
+#     input:
+#         ref = "../Rnor_6.0/Rattus_norvegicus.Rnor_6.0.dna.toplevel.fa",
+#         refi = "../Rnor_6.0/Rattus_norvegicus.Rnor_6.0.dna.toplevel.fa.fai",
+#         refd = "../Rnor_6.0/Rattus_norvegicus.Rnor_6.0.dna.toplevel.dict",
+#         bam = lambda w: f"../markdup_out/{w.region}/{wrong_bam[w.rat_id + '_' + w.region]}.bam",
+#         vcf = "{rat_id}.vcf.gz",
+#         vcfi = "{rat_id}.vcf.gz.tbi"
+#     output:
+#         "readcounts_mixed/{rat_id}_{region}.mixed.readcounts.txt"
+#     conda:
+#         "../../envs/gatk.yaml"
+#     shell:
+#         # -DF NotDuplicateReadFilter
+#         """
+#         gatk ASEReadCounter \
+#         -R {input.ref} \
+#         -I {input.bam} \
+#         -V {input.vcf} \
+#         -O {output} \
+#         --min-depth-of-non-filtered-base 1 \
+#         --min-mapping-quality 250 \
+#         --min-base-quality 15
+#         """
+
+rule ASEReadCounter_mismatch:
+    input:
+        ref = "../Rnor_6.0/Rattus_norvegicus.Rnor_6.0.dna.toplevel.fa",
+        refi = "../Rnor_6.0/Rattus_norvegicus.Rnor_6.0.dna.toplevel.fa.fai",
+        refd = "../Rnor_6.0/Rattus_norvegicus.Rnor_6.0.dna.toplevel.dict",
+        bam = "../markdup_out/{region}/{bam_rat_id}_{region}.bam",
+        vcf = "{vcf_rat_id}.vcf.gz",
+        vcfi = "{vcf_rat_id}.vcf.gz.tbi"
+    output:
+        "readcounts_{mismatch_type}/{vcf_rat_id}.{bam_rat_id}_{region}.readcounts.txt"
+    conda:
+        "../../envs/gatk.yaml"
+    shell:
+        # -DF NotDuplicateReadFilter
+        """
+        gatk ASEReadCounter \
+        -R {input.ref} \
+        -I {input.bam} \
+        -V {input.vcf} \
+        -O {output} \
+        --min-depth-of-non-filtered-base 1 \
+        --min-mapping-quality 250 \
+        --min-base-quality 15
+        """
+
+rule assemble_ASE:
+    input:
+        lambda w: expand("readcounts/{sample_id}.readcounts.txt", sample_id=sample_ids[w.region])
+    output:
+        "{region}.counts.txt.gz"
+    params:
+        sample_ids = lambda w: " ".join(sample_ids[w.region]),
+        interm = "{region}.counts.txt"
+    shell:
+        # :> {params.interm}
+        """
+        echo "sample_id\tref_count\talt_count" > {params.interm}
+        for ID in {params.sample_ids}; do
+            FILE="readcounts/$ID.readcounts.txt"
+            tail -n +2 $FILE | cut -f6,7 | sed "s/^/$ID\t/" >> {params.interm}
+        done
+        gzip {params.interm}
+        """
+
+# rule assemble_ASE_mixed:
+#     input:
+#         expand("readcounts_mixed/{sample_id}.mixed.readcounts.txt", sample_id=rand_samples)
+#     output:
+#         "mixed.counts.txt.gz"
+#     params:
+#         sample_ids = " ".join(rand_samples),
+#         interm = "mixed.counts.txt"
+#     shell:
+#         # :> {params.interm}
+#         """
+#         echo "sample_id\tref_count\talt_count" > {params.interm}
+#         for ID in {params.sample_ids}; do
+#             FILE="readcounts_mixed/$ID.mixed.readcounts.txt"
+#             tail -n +2 $FILE | cut -f6,7 | sed "s/^/$ID\t/" >> {params.interm}
+#         done
+#         gzip {params.interm}
+#         """
+
+rule assemble_ASE_mixed:
+    input:
+        expand("readcounts_mixed/{id}.readcounts.txt",
+               id=[f"{x[0]}.{x[1]}" for x in mixed_pairs])
+    output:
+        "mixed.counts.txt.gz"
+    params:
+        ids = " ".join([f"{x[0]}.{x[1]}" for x in mixed_pairs]),
+        interm = "mixed.counts.txt"
+    shell:
+        """
+        echo "sample_id\tref_count\talt_count" > {params.interm}
+        for ID in {params.ids}; do
+            FILE="readcounts_mixed/$ID.readcounts.txt"
+            tail -n +2 $FILE | cut -f6,7 | sed "s/^/$ID\t/" >> {params.interm}
+        done
+        gzip {params.interm}
+        """
+
+rule assemble_ASE_trymatch:
+    input:
+        lambda w: expand("readcounts_trymatch/{id}.readcounts.txt",
+                         id=[f"{x[0]}.{x[1]}" for x in trymatch_pairs])
+    output:
+        "trymatch.counts.txt.gz"
+    params:
+        ids = " ".join([f"{x[0]}.{x[1]}" for x in trymatch_pairs]),
+        interm = "trymatch.counts.txt"
+    shell:
+        """
+        echo "sample_id\tref_count\talt_count" > {params.interm}
+        for ID in {params.ids}; do
+            FILE="readcounts_trymatch/$ID.readcounts.txt"
+            tail -n +2 $FILE | cut -f6,7 | sed "s/^/$ID\t/" >> {params.interm}
+        done
+        gzip {params.interm}
+        """
+

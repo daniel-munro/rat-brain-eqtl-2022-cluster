@@ -1,0 +1,79 @@
+import pandas as pd
+
+# genes = pd.read_csv("../tensorqtl/ACCT.cis_qtl.txt.gz", sep="\t")
+# genes = genes.loc[genes["qval"] < 0.05, :]
+# genes = list(genes["phenotype_id"])
+# genes = genes[:500]
+tissues = ["Acbc", "IL", "LHB", "PL", "VoLo"]
+tissues = ["IL", "LHB", "PL", "VoLo"]
+genes = {}
+for tissue in tissues:
+    expr = pd.read_csv(f"../expression/ensembl-gene_inv-quant_{tissue}.bed.gz", sep="\t")
+    genes[tissue] = list(expr.gene_id) #[:100]
+    # with open(f"genes.{tissue}.txt", "w") as out:
+    #     for gene in genes[tissue]:
+    #         out.write(f"{gene}\n")
+
+
+rule all:
+    input:
+        # expand("input/Acbc/{gene}.sbams.dat", gene=genes["Acbc"]),
+        expand("input/IL/{gene}.sbams.dat", gene=genes["IL"]),
+        # expand("input/LHB/{gene}.sbams.dat", gene=genes["LHB"]),
+        # expand("input/PL/{gene}.sbams.dat", gene=genes["PL"]),
+        # expand("input/VoLo/{gene}.sbams.dat", gene=genes["VoLo"]),
+        # expand("output/Acbc/{gene}.dat", gene=genes["Acbc"]),
+        # expand("fastenloc.eqtl.annotation.{tissue}.vcf.gz", tissue=tissues)
+
+
+# python3 prepare_sbams.py ../genotype/P50.rnaseq.88.unpruned.vcf.gz ../expression/ensembl-gene_log2_Acbc.bed.gz ENSRNOG00000014303 > input/ENSRNOG00000014303.sbams.dat
+rule prepare_sbams:
+    input:
+        vcf = "../genotype/P50.rnaseq.88.unpruned.vcf.gz",
+        bed = "../expression/ensembl-gene_inv-quant_{tissue}.bed.gz",
+        covar = "covar/{tissue}.covariates.txt"
+    output:
+        "input/{tissue}/{gene}.sbams.dat"
+    # conda:
+    #     "/home/dmunro/envs/biopython.yaml"
+    shell:
+        """
+        python3 prepare_sbams.py \
+        {input.vcf} {input.bed} {wildcards.gene} \
+        --covar {input.covar} \
+        > {output}
+        """
+
+
+# ~/tools/dap/dap_src/dap-g -d input/ENSRNOG00000014303.sbams.dat -o output/ENSRNOG00000014303.dat
+rule dap:
+    input:
+        "input/{tissue}/{gene}.sbams.dat"
+    output:
+        "output/{tissue}/{gene}.dat"
+    params:
+        log = "log/{tissue}/{gene}.log" # listed as a param so it isn't deleted on error.
+    shell:
+        # size_limit prevents segmentation fault?
+        # '|| true' because dap-g returns non-zero exit code even when it completes.
+        # "~/tools/dap/dap_src/dap-g -d {input} -o {output} -l {params.log} -size_limit 200 || true"
+        # "~/tools/dap/dap_src/dap-g -d {input} -o {output} -l {params.log} -msize 5 -size_limit 500 || true"
+        "~/tools/dap/dap_src/dap-g -d {input} -o {output} -l {params.log} -msize 5 -ld_control 0.5"
+
+# perl ~/tools/fastenloc/src/summarize_dap2enloc.pl -dir output/Acbc -vcf ../genotype/P50.rnaseq.88.unpruned.vcf.gz -tissue Acbc > fastenloc.eqtl.annotation.Acbc.vcf
+rule prepare_fastenloc_anno:
+    input:
+        dapout = lambda w: [f"output/{w.tissue}/{gene}.dat" for gene in genes[w.tissue]],
+        vcf = "../genotype/P50.rnaseq.88.unpruned.vcf.gz"
+    output:
+        "fastenloc.eqtl.annotation.{tissue}.vcf.gz"
+    params:
+        indir = "output/{tissue}"
+    shell:
+        """
+        perl ~/tools/fastenloc/src/summarize_dap2enloc.pl \
+        -dir {params.indir} \
+        -vcf {input.vcf} \
+        -tissue {wildcards.tissue} \
+        | bgzip > {output}
+        """
