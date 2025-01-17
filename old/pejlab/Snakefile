@@ -1,0 +1,169 @@
+import pandas as pd
+from snakemake.remote.SFTP import RemoteProvider
+SFTP = RemoteProvider(username="dmunro")
+
+regions = ["Acbc"]
+# regions = ["Acbc", "IL", "LHB", "PL", "VoLo"]
+fastqs = pd.read_csv("data/fastq_files_listing.txt", sep="\t")
+# fastqs = fastqs.loc[fastqs["brain_region"].isin(["Acbc"])]
+sample_ids = {}
+for region in regions:
+    fastqs_region = fastqs.loc[fastqs["brain_region"] == region]
+    sample_ids[region] = fastqs_region["library"].unique()
+# sample_ids = sample_ids[:10]
+
+# rat_ids = list(set([x.split("_")[0] for x in sample_ids]))
+# with open("rat_ids.txt", "w") as f:
+#     # f.write(" ".join(rat_ids) + "\n")
+#     for r in rat_ids:
+#         f.write("{0}\t{0}\n".format(r))
+
+configfile: ".config/snakemake/main/config.yaml"
+
+wildcard_constraints:
+    rat_id = "[A-Z0-9]+",
+    region = "[A-Za-z]+",
+    chr = "chr[0-9]+"
+
+# include: "tensorqtl.smk"
+include: "qtl2.smk"
+include: "afc.smk"
+include: "analysis.smk"
+include: "hapASE.smk"
+
+rule all:
+    input:
+        # "data/tensorqtl/{0}/{0}.basic.cis_qtl.txt.gz".format(region),
+        # "data/tensorqtl/{0}/{0}.basic2.cis_qtl.txt.gz".format(region),
+        # "data/tensorqtl/{0}/{0}.main.cis_qtl.txt.gz".format(region),
+        # "data/tensorqtl/{0}/{0}.main2.cis_qtl.txt.gz".format(region),
+        # "data/afc/{0}.basic.aFC.txt".format(region),
+        # "data/afc/{0}.basic2.aFC.txt".format(region),
+        # "data/afc/{0}.main.aFC.txt".format(region),
+        # "data/afc/{0}.main2.aFC.txt".format(region),
+        # "data/afc/{0}.qtl2.aFC.txt".format(region),
+        # "data/afc/{0}.basic.ASE_aFC.txt".format(region),
+        # "data/afc/{0}.basic2.ASE_aFC.txt".format(region),
+        # "data/afc/{0}.main.ASE_aFC.txt".format(region),
+        # "data/afc/{0}.main2.ASE_aFC.txt".format(region),
+        # "data/afc/{0}.qtl2.ASE_aFC.txt".format(region),
+        # expand("data/afc/{region}.{method}.aFC.txt", region=regions, method=["main", "basic"]),
+        # expand("data/afc/{region}.{method}.ASE_aFC.txt", region=regions, method=["main", "basic"]),
+        # expand("analysis/haplotype_probs_chr{chr}.rds", chr=range(1, 21)),
+        # expand("analysis/haplotype_sim_chr{chr}.npy", chr=range(1, 21)),
+        # expand("analysis/baud2014_chr{chr}.rds", chr=range(1, 21)),
+        # "data/qtl2/phase/geno_phase1.csv",
+        expand("data/qtl2/phase/hap_probs_phase{phase}.rds", phase=[1, 2]),
+        # expand("data/eyes/genotype/eyes_chr{chr}.vcf.gz", chr=range(1, 21)),
+
+############
+# Genotype #
+############
+
+rule vcf_per_chromosome:
+    output:
+        "data/genotype/phased/chr{chr}.P50.rnaseq.88.unpruned.vcf"
+    params:
+        remote = "tscc:/oasis/tscc/scratch/aschitre/round8_imputation/phased_genotypes"
+    shell:
+        """
+        rsync -av {params.remote}/chr{wildcards.chr}/chr{wildcards.chr}.P50.rnaseq.88.unpruned.vcf \
+        data/genotype/phased/
+        """
+
+rule vcf_all_chromosomes:
+    input:
+        expand("data/genotype/phased/chr{chr}.P50.rnaseq.88.unpruned.vcf", chr=range(1, 21))
+    output:
+        "data/genotype/P50.rnaseq.88.unpruned.vcf.gz"
+    shell:
+        # "bcftools concat -o {output} -Oz {input}"
+        """
+        bcftools annotate \
+        --rename-chrs data/genotype/chrs.txt \
+        -o {output} -Oz \
+        <(bcftools concat -Ou {input})
+        """
+
+rule observed_snp_list:
+    input:
+        expand("data/genotype/imputing/chr{chr}.observed.snplist.txt", chr=range(1, 21))
+    output:
+        "data/genotype/imputing/observed.snplist.txt"
+    shell:
+        "cat {input} > {output}"
+
+rule index_vcf:
+    input: "{base}.vcf.gz"
+    output: "{base}.vcf.gz.tbi"
+    shell:
+        "tabix -p vcf {input}"
+
+rule vcf_chr_list:
+    input:
+        vcf = "{base}.vcf.gz",
+        vcfi = "{base}.vcf.gz.tbi"
+    output:
+        "{base}.chrlist.txt"
+    shell:
+        "tools/tabix --list-chroms {input.vcf} > {output}"
+
+##############
+# References #
+##############
+
+rule fasta_index:
+    # (from https://github.com/broadinstitute/gtex-pipeline/blob/master/TOPMed_RNAseq_pipeline.md)
+    input: "data/Rnor_6.0/Rattus_norvegicus.Rnor_6.0.dna.toplevel.fa"
+    output: "{input}.fai"
+    shell:
+        "samtools faidx {input}"
+
+rule fasta_dict:
+    input: "data/Rnor_6.0/Rattus_norvegicus.Rnor_6.0.dna.toplevel.fa"
+    output: "data/Rnor_6.0/Rattus_norvegicus.Rnor_6.0.dna.toplevel.dict"
+    shell:
+        "picard CreateSequenceDictionary R={input} O={output}"
+
+# rule filter_gtf:
+#     # Remove GTF entries without transcript_id attribute, required by RNA-SeQC:
+#     input: "data/Rnor_6.0_anno/Rattus_norvegicus.Rnor_6.0.99.gtf"
+#     output: "data/Rnor_6.0_anno/Rattus_norvegicus.Rnor_6.0.99.trid.gtf"
+#     shell: "grep -P '(#!)|(transcript_id)' {input} > {output}"
+
+rule collapse_annotation:
+    # RNA-SeQC requires gene-level annotations (no duplicate exon entries).
+    input:
+        "data/Rnor_6.0_anno/Rattus_norvegicus.Rnor_6.0.99.gtf"
+    output:
+        "data/Rnor_6.0_anno/Rattus_norvegicus.Rnor_6.0.99.genes.gtf"
+    shell:
+        "python3 src/collapse_annotation.py {input} {output}"
+
+rule gene_bed:
+    input:
+        "data/Rnor_6.0_anno/Rattus_norvegicus.Rnor_6.0.99.genes.gtf"
+    output:
+        "data/Rnor_6.0_anno/Rattus_norvegicus.Rnor_6.0.99.genes.bed"
+    shell:
+        "gtf2bed < {input} | awk '{{ if ($8 == \"gene\") {{ print }}}}' > {output}"
+
+#############
+# VCF stats #
+#############
+
+rule vcf_stats_founders:
+    input:
+        "data/genotype/All8Rats-rn6_gVCFpool.6nt.Pooled.chrs1-20.X.Y.M.renamed.vcf.gz"
+    output:
+        "vcf_stats_founders/summary.vchk"
+    shell:
+        "bcftools stats -s - {input} > {output}"
+
+rule vcf_stats_samples:
+    input:
+        "data/genotype/P50.rnaseq.88.unpruned.vcf.gz"
+    output:
+        "vcf_stats_samples/summary.vchk"
+    shell:
+        "bcftools stats -s - {input} > {output}"

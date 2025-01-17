@@ -1,0 +1,128 @@
+import pandas as pd
+
+# regions = ["Acbc", "IL", "LHB", "PL", "VoLo"]
+regions = ["Acbc"]
+# # Use file list with bad fastqs omitted until they're fixed:
+# fastqs = pd.read_csv("data/fastq/fastq_files_listing_edit.txt", sep="\t")
+fastqs = pd.read_csv("data/fastq/fastq_files_listing.txt", sep="\t")
+# fastqs = fastqs.loc[fastqs["brain_region"] == region]
+# sample_ids = fastqs["library"].unique()
+sample_ids = {}
+for region in regions:
+    fastqs_region = fastqs.loc[fastqs["brain_region"] == region]
+    sample_ids[region] = fastqs_region["library"].unique()
+
+localrules:
+    individual_vcf,
+    observed_snp_list,
+    vcf_chr_list,
+    index_vcf,
+    index_bam,
+    combine_RSEM,
+    phaser_expr_matrix,
+    vcf_to_plink,
+    sample_participant_lookup,
+    prepare_expression,
+    expression_tsv_to_bed,
+    expression_gct_to_bed,
+    other_covariates,
+    combine_covariates,
+    empty_covariates,
+    phaser_sample_map,
+    phaser_gene_var_pairs,
+    qtl2_pheno,
+    qtl2_tss,
+    qtl2_covar,
+    qtl2_pvals,
+    expression_gct_to_bed,
+    expression_gct_to_bed_qnorm,
+
+wildcard_constraints:
+    rat_id = "[A-Z0-9]+",
+    region = "[A-Za-z]+",
+    method = "[a-z0-9]+",
+    chr = "chr[0-9]+",
+    rsem_field = "(expected_count)|(TPM)",
+
+include: "align.smk"
+include: "expression.smk"
+include: "ASE.smk"
+include: "tensorqtl.smk"
+include: "qtl2.smk"
+include: "afc.smk"
+
+
+def vcf_path(wildcards):
+    rat_id = wildcards.sample_id.split("_")[0]
+    return "data/genotype/individual/{}.vcf.gz".format(rat_id)
+
+
+rule all:
+    input:
+        # expand("data/star_out/{region}/{sample_id}.Aligned.toTranscriptome.out.bam",
+        #        region=region, sample_id=sample_ids),
+        # expand("data/rsem_out/{sample_id}.genes.results.gz", sample_id=sample_ids),
+        # expand("data/expression/{region}.rsem_expected_count.gct.gz", region=regions),
+        # expand("data/expression/{region}.rsem_TPM.gct.gz", region=regions),
+        # expand("data/phaser_out/{sample_id}.gene_ae.txt", sample_id=sample_ids)
+        # expand("data/phaser_pop_out/{region}.expr_matrix.gw_phased.bed.gz", region=regions),
+        # expand(
+        #     "data/tensorqtl/{region}/{region}.{method}.cis_qtl.txt.gz",
+        #     region=regions,
+        #     method=["main", "main2", "main3", "basic", "basic2", "basic3"]
+        # ),
+        # expand(
+        #     "data/afc/{region}.{method}.aFC.txt",
+        #     region=regions,
+        #     # method=["main", "basic"]
+        #     method=["main", "main2", "main3", "basic", "basic2", "basic3"]
+        # ),
+        expand(
+            "data/afc/{region}.{method}.ASE_aFC.txt",
+            region=regions,
+            # method=["main"]
+            method=["main", "main2", "main3", "main4", "main5",
+                    "basic", "basic2", "basic3", "basic4", "basic5", "qtl2"]
+        ),
+
+rule individual_vcf:
+    input:
+        "data/genotype/P50.rnaseq.88.unpruned.vcf.gz"
+    output:
+        "data/genotype/individual/{rat_id}.vcf.gz"
+    shell:
+        "bcftools view -s {wildcards.rat_id} --min-ac=1 -O z -o {output} {input}"
+
+rule observed_snp_list:
+    input:
+        expand("data/genotype/imputing/chr{chr}.observed.snplist.txt", chr=range(1, 21))
+    output:
+        "data/genotype/imputing/observed.snplist.txt"
+    shell:
+        "cat {input} > {output}"
+
+rule vcf_chr_list:
+    input:
+        vcf = "{base}.vcf.gz",
+        vcfi = "{base}.vcf.gz.tbi"
+    output:
+        "{base}.chrlist.txt"
+    shell:
+        "tabix --list-chroms {input.vcf} > {output}"
+
+rule index_vcf:
+    input:
+        "{base}.vcf.gz"
+    output:
+        "{base}.vcf.gz.tbi"
+    shell:
+        "tabix -p vcf {input}"
+
+rule index_bam:
+    input:
+        "{base}.bam"
+    output:
+        "{base}.bam.bai"
+    shell:
+        "samtools index {input}"
+
